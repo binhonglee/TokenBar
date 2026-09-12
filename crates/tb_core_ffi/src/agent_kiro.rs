@@ -76,10 +76,24 @@ struct UsageBreakdown {
     usage_limit_with_precision: Option<f64>,
 }
 
-pub(crate) async fn fetch(
-    now: DateTime<Utc>,
-    credential: KiroCredential,
-) -> Result<KiroData, ProviderFetchFailure> {
+/// Takes no `now`: it reads the clock after the response arrives, because the
+/// reset validation below is a comparison against the present.
+///
+/// The caller used to capture `Utc::now()` on its first line and hold it across
+/// credential discovery (a `sqlite3` subprocess, up to 5s) and the request
+/// itself (up to 10s), so the instant the reset was judged against was older
+/// than the response by construction. A reset that expired inside that window
+/// would still compare as future, and — now that an expired reset is terminal
+/// rather than merely reset-less — the stale card would be published as a
+/// success and overwrite the last-good entry, which is precisely the outcome
+/// this adapter rejects an expired reset to prevent.
+///
+/// `agent_usage.rs`'s `apply_provider_outcome` dropped its own `now` parameter
+/// for the same reason (`bf7a6b92`); the parameter is removed rather than moved
+/// below the `await` so a pre-request timestamp cannot be handed back in.
+/// `decode_usage_response` keeps its parameter, because its tests need to state
+/// the instant they are asserting about.
+pub(crate) async fn fetch(credential: KiroCredential) -> Result<KiroData, ProviderFetchFailure> {
     let verified = agent_account_scope::resolve_credential(
         "kiro",
         credential.semantic_source,
@@ -146,7 +160,7 @@ pub(crate) async fn fetch(
             "Kiro usage API rejected the request (status {status})."
         )),
     })?;
-    let (plan, windows) = decode_usage_response(&body, now)?;
+    let (plan, windows) = decode_usage_response(&body, Utc::now())?;
     Ok(KiroData {
         identity: Some(AgentIdentity { email: None, plan }),
         account_scope: Ok(account_scope),
